@@ -24,7 +24,7 @@ class TextHandler:
         tables = self.table_extractor.extract_tables()
         return tables
     
-    def extract_text(self, found_toc: bool):
+    def extract_text(self, found_toc: bool = False):
         pages, paragraphs, sentences, toc = self.text_extractor.extract()
 
         return pages, paragraphs, sentences, toc

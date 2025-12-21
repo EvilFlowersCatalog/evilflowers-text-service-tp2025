@@ -6,8 +6,14 @@ import httpx
 from text_handler.TextExtractor import TextExtractor
 from text_handler.TextProcessor import TextProcessor
 from text_handler.TextService import TextHandler
+from fastapi.concurrency import run_in_threadpool
 
 from elvira_elasticsearch_client import ElasticsearchClient # type: ignore
+from semantic.indexer import SemanticIndexer 
+
+import logging
+logger = logging.getLogger("uvicorn.error")
+
 
 app = FastAPI(
     title="EvilFlowers Text Service",
@@ -15,7 +21,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
-ELASTICSEARCH_SERVICE_URL = "http://elasticsearch-module:9200"
+ELASTICSEARCH_SERVICE_URL = "http://elasticsearch:9200"
 
 async def save_text_in_elasticsearch(file: UploadFile, content: str, extracted_text: str) -> Tuple[str, Dict]:
     # Prepare document for Elasticsearch
@@ -89,6 +95,55 @@ async def process_text(file: UploadFile = File(...)):
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
         raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/index_text")
+async def index_text(file: UploadFile = File(...)):
+    indexer = SemanticIndexer()
+    temp_path = None
+    try:
+        # Save file
+        safe_name = os.path.basename(file.filename)  # strips any path like catalogs/.../file.pdf
+        temp_path = os.path.join("temp", safe_name)
+        os.makedirs("temp", exist_ok=True)
+        content = await file.read()
+        with open(temp_path, "wb") as f:
+            f.write(content)
+
+        # Extract using TextHandler
+        document_id = str(uuid.uuid4())
+        th = TextHandler(temp_path)
+        pages, paragraphs, sentences, toc = th.extract_text(found_toc=False)
+
+        # build a full text if you need it
+        extracted_text = "\n\n".join(page_text for _, page_text in pages)
+
+
+        if pages is None or paragraphs is None:
+            raise HTTPException(
+                status_code=500,
+                detail="TextHandler must provide 'pages' and 'paragraphs' for semantic indexing."
+            )
+
+        # Index into Milvus (run sync code without blocking event loop)
+        result = await run_in_threadpool(
+            indexer.index_document,
+            document_id,
+            pages,
+            paragraphs
+        )
+
+        return {
+            "document_id": document_id,
+            "semantic_index_result": result,
+            "text_preview": extracted_text[:1000] if extracted_text else ""
+        }
+
+    except Exception as e:
+        logger.exception("index_text failed")   # <-- prints full traceback
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
 
 if __name__ == "__main__":
     import uvicorn
